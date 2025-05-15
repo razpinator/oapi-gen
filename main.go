@@ -54,13 +54,14 @@ var (
 
 // Model for Bubble Tea UI
 type model struct {
-	state          string // "menu", "input_spec", "input_output", "confirm_cleanup", "result"
+	state          string // "menu", "input_spec", "input_output", "confirm_cleanup", "input_sample_output", "result"
 	cursor         int
 	choices        []string
 	selectedChoice string
 	inputField     string
 	inputSpec      string
 	outputDir      string
+	sampleOutput   string
 	errorMsg       string
 	resultMsg      string
 }
@@ -69,7 +70,7 @@ type model struct {
 func InitialModel() model {
 	return model{
 		state:   "menu",
-		choices: []string{"Generate Code from OpenAPI Spec", "Clean Up Generated Folder", "Exit"},
+		choices: []string{"Generate Code from OpenAPI Spec", "Clean Up Generated Folder", "Generate Sample OpenAPI JSON", "Exit"},
 		cursor:  0,
 	}
 }
@@ -104,6 +105,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else if m.selectedChoice == "Generate Code from OpenAPI Spec" {
 					m.state = "input_spec"
 					m.inputField = ""
+				} else if m.selectedChoice == "Generate Sample OpenAPI JSON" {
+					m.state = "input_sample_output"
+					m.inputField = "./sample-openapi.json" // Default output file path
 				}
 			}
 		}
@@ -152,6 +156,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputField += msg.String()
 			}
 		}
+	case "input_sample_output":
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				if m.inputField == "" {
+					m.errorMsg = "Output file path cannot be empty"
+					return m, nil
+				}
+				m.sampleOutput = m.inputField
+				m.state = "result"
+				// Perform sample JSON generation
+				return m, m.generateSampleJSONCmd()
+			case "backspace":
+				if len(m.inputField) > 0 {
+					m.inputField = m.inputField[:len(m.inputField)-1]
+				}
+			default:
+				m.inputField += msg.String()
+			}
+		}
 	case "confirm_cleanup":
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
@@ -182,6 +209,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.errorMsg = fmt.Sprintf("Error: %v", msg.err)
 			}
 		case cleanupResultMsg:
+			m.resultMsg = msg.message
+			if msg.err != nil {
+				m.errorMsg = fmt.Sprintf("Error: %v", msg.err)
+			}
+		case sampleJSONResultMsg:
 			m.resultMsg = msg.message
 			if msg.err != nil {
 				m.errorMsg = fmt.Sprintf("Error: %v", msg.err)
@@ -225,6 +257,15 @@ func (m model) View() string {
 			s.WriteString(errorStyle.Render(m.errorMsg) + "\n")
 		}
 
+	case "input_sample_output":
+		s.WriteString(titleStyle.Render("OpenAPI Code Generator - Sample JSON Output") + "\n\n")
+		s.WriteString("Enter file path to save the sample OpenAPI JSON:\n\n")
+		s.WriteString(inputStyle.Render(m.inputField) + "\n")
+		s.WriteString("\nPress Enter to continue, q to quit\n")
+		if m.errorMsg != "" {
+			s.WriteString(errorStyle.Render(m.errorMsg) + "\n")
+		}
+
 	case "confirm_cleanup":
 		s.WriteString(titleStyle.Render("OpenAPI Code Generator - Cleanup") + "\n\n")
 		s.WriteString("Are you sure you want to delete the generated folder and its contents?\n")
@@ -252,6 +293,11 @@ type generationResultMsg struct {
 }
 
 type cleanupResultMsg struct {
+	message string
+	err     error
+}
+
+type sampleJSONResultMsg struct {
 	message string
 	err     error
 }
@@ -300,6 +346,221 @@ func (m model) cleanupGeneratedFolderCmd() tea.Cmd {
 
 		return cleanupResultMsg{message: fmt.Sprintf("Successfully cleaned up folder %s", dirToClean), err: nil}
 	}
+}
+
+// Command to generate sample OpenAPI JSON file
+func (m model) generateSampleJSONCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Ensure the directory for the output file exists
+		outputDir := filepath.Dir(m.sampleOutput)
+		if outputDir != "." {
+			if err := os.MkdirAll(outputDir, 0755); err != nil {
+				return sampleJSONResultMsg{message: "", err: fmt.Errorf("failed to create directory for sample JSON: %v", err)}
+			}
+		}
+
+		// Generate sample OpenAPI JSON content
+		sampleJSON := generateSampleOpenAPIJSON()
+		if err := os.WriteFile(m.sampleOutput, []byte(sampleJSON), 0644); err != nil {
+			return sampleJSONResultMsg{message: "", err: fmt.Errorf("failed to write sample JSON to %s: %v", m.sampleOutput, err)}
+		}
+
+		return sampleJSONResultMsg{message: fmt.Sprintf("Sample OpenAPI JSON generated successfully at %s", m.sampleOutput), err: nil}
+	}
+}
+
+// generateSampleOpenAPIJSON creates a sample OpenAPI JSON specification as a string
+func generateSampleOpenAPIJSON() string {
+	var jsonBuilder strings.Builder
+	jsonBuilder.WriteString(`{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Sample API",
+    "description": "A sample API specification for testing the OpenAPI Code Generator",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/users": {
+      "get": {
+        "operationId": "getUsers",
+        "summary": "Retrieve a list of users",
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/User"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createUser",
+        "summary": "Create a new user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "User created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          }
+        }
+      }
+    },
+    "/users/{id}": {
+      "get": {
+        "operationId": "getUserById",
+        "summary": "Retrieve a user by ID",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateUser",
+        "summary": "Update a user by ID",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "User updated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "User not found"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteUser",
+        "summary": "Delete a user by ID",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "User deleted successfully"
+          },
+          "404": {
+            "description": "User not found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the user"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name of the user"
+          },
+          "age": {
+            "type": "integer",
+            "description": "Age of the user"
+          }
+        },
+        "required": ["id", "name"]
+      },
+      "UserRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the user"
+          },
+          "age": {
+            "type": "integer",
+            "description": "Age of the user"
+          }
+        },
+        "required": ["name"]
+      }
+    }
+  }
+}`)
+	return jsonBuilder.String()
 }
 
 // Main function to start Bubble Tea UI
