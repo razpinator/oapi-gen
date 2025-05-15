@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // OpenAPISpec represents the structure of an OpenAPI v3 specification
@@ -25,37 +27,288 @@ type Schema struct {
 	Ref        string                 `json:"$ref,omitempty"`
 }
 
-// Main function to handle CLI arguments and code generation
+// Styles for Bubble Tea UI
+var (
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFF")).
+			Background(lipgloss.Color("#7D56F4")).
+			Padding(0, 1)
+
+	choiceStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFF"))
+
+	selectedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#7D56F4")).
+			Bold(true)
+
+	inputStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFF")).
+			Background(lipgloss.Color("#333")).
+			Padding(0, 1)
+
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF5555")).
+			Bold(true)
+)
+
+// Model for Bubble Tea UI
+type model struct {
+	state          string // "menu", "input_spec", "input_output", "confirm_cleanup", "result"
+	cursor         int
+	choices        []string
+	selectedChoice string
+	inputField     string
+	inputSpec      string
+	outputDir      string
+	errorMsg       string
+	resultMsg      string
+}
+
+// InitialModel sets up the starting state for Bubble Tea
+func InitialModel() model {
+	return model{
+		state:   "menu",
+		choices: []string{"Generate Code from OpenAPI Spec", "Clean Up Generated Folder", "Exit"},
+		cursor:  0,
+	}
+}
+
+// Bubble Tea interface functions
+func (m model) Init() tea.Cmd {
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch m.state {
+	case "menu":
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down":
+				if m.cursor < len(m.choices)-1 {
+					m.cursor++
+				}
+			case "enter":
+				m.selectedChoice = m.choices[m.cursor]
+				if m.selectedChoice == "Exit" {
+					return m, tea.Quit
+				} else if m.selectedChoice == "Clean Up Generated Folder" {
+					m.state = "confirm_cleanup"
+				} else if m.selectedChoice == "Generate Code from OpenAPI Spec" {
+					m.state = "input_spec"
+					m.inputField = ""
+				}
+			}
+		}
+	case "input_spec":
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				if m.inputField == "" {
+					m.errorMsg = "Input file path cannot be empty"
+					return m, nil
+				}
+				m.inputSpec = m.inputField
+				m.inputField = "generated" // Default output directory
+				m.state = "input_output"
+			case "backspace":
+				if len(m.inputField) > 0 {
+					m.inputField = m.inputField[:len(m.inputField)-1]
+				}
+			default:
+				m.inputField += msg.String()
+			}
+		}
+	case "input_output":
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				if m.inputField == "" {
+					m.errorMsg = "Output directory cannot be empty"
+					return m, nil
+				}
+				m.outputDir = m.inputField
+				m.state = "result"
+				// Perform generation in a non-blocking way
+				return m, m.generateCodeCmd()
+			case "backspace":
+				if len(m.inputField) > 0 {
+					m.inputField = m.inputField[:len(m.inputField)-1]
+				}
+			default:
+				m.inputField += msg.String()
+			}
+		}
+	case "confirm_cleanup":
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "y", "Y":
+				m.state = "result"
+				return m, m.cleanupGeneratedFolderCmd()
+			case "n", "N":
+				m.state = "menu"
+			}
+		}
+	case "result":
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "enter":
+				m.state = "menu"
+				m.errorMsg = ""
+				m.resultMsg = ""
+			}
+		case generationResultMsg:
+			m.resultMsg = msg.message
+			if msg.err != nil {
+				m.errorMsg = fmt.Sprintf("Error: %v", msg.err)
+			}
+		case cleanupResultMsg:
+			m.resultMsg = msg.message
+			if msg.err != nil {
+				m.errorMsg = fmt.Sprintf("Error: %v", msg.err)
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m model) View() string {
+	var s strings.Builder
+
+	switch m.state {
+	case "menu":
+		s.WriteString(titleStyle.Render("OpenAPI Code Generator") + "\n\n")
+		s.WriteString("Select an option:\n\n")
+		for i, choice := range m.choices {
+			if m.cursor == i {
+				s.WriteString(selectedStyle.Render("> "+choice) + "\n")
+			} else {
+				s.WriteString(choiceStyle.Render("  "+choice) + "\n")
+			}
+		}
+		s.WriteString("\nUse arrow keys to navigate, Enter to select, q to quit\n")
+
+	case "input_spec":
+		s.WriteString(titleStyle.Render("OpenAPI Code Generator - Input Spec") + "\n\n")
+		s.WriteString("Enter path to OpenAPI JSON specification file:\n\n")
+		s.WriteString(inputStyle.Render(m.inputField) + "\n")
+		s.WriteString("\nPress Enter to continue, q to quit\n")
+		if m.errorMsg != "" {
+			s.WriteString(errorStyle.Render(m.errorMsg) + "\n")
+		}
+
+	case "input_output":
+		s.WriteString(titleStyle.Render("OpenAPI Code Generator - Output Directory") + "\n\n")
+		s.WriteString("Enter output directory for generated code:\n\n")
+		s.WriteString(inputStyle.Render(m.inputField) + "\n")
+		s.WriteString("\nPress Enter to continue, q to quit\n")
+		if m.errorMsg != "" {
+			s.WriteString(errorStyle.Render(m.errorMsg) + "\n")
+		}
+
+	case "confirm_cleanup":
+		s.WriteString(titleStyle.Render("OpenAPI Code Generator - Cleanup") + "\n\n")
+		s.WriteString("Are you sure you want to delete the generated folder and its contents?\n")
+		s.WriteString("This action cannot be undone.\n\n")
+		s.WriteString("Press 'y' to confirm, 'n' to cancel, q to quit\n")
+
+	case "result":
+		s.WriteString(titleStyle.Render("OpenAPI Code Generator - Result") + "\n\n")
+		if m.resultMsg != "" {
+			s.WriteString(m.resultMsg + "\n\n")
+		}
+		if m.errorMsg != "" {
+			s.WriteString(errorStyle.Render(m.errorMsg) + "\n\n")
+		}
+		s.WriteString("Press Enter to return to menu, q to quit\n")
+	}
+
+	return s.String()
+}
+
+// Custom messages for async operations
+type generationResultMsg struct {
+	message string
+	err     error
+}
+
+type cleanupResultMsg struct {
+	message string
+	err     error
+}
+
+// Command to generate code asynchronously
+func (m model) generateCodeCmd() tea.Cmd {
+	return func() tea.Msg {
+		spec, err := readOpenAPISpec(m.inputSpec)
+		if err != nil {
+			return generationResultMsg{message: "", err: err}
+		}
+
+		// Create output directory
+		if err := os.MkdirAll(m.outputDir, 0755); err != nil {
+			return generationResultMsg{message: "", err: fmt.Errorf("error creating output directory: %v", err)}
+		}
+
+		// Generate code
+		if err := generateCode(spec, m.outputDir); err != nil {
+			return generationResultMsg{message: "", err: fmt.Errorf("error generating code: %v", err)}
+		}
+
+		return generationResultMsg{message: fmt.Sprintf("Code generated successfully in %s", m.outputDir), err: nil}
+	}
+}
+
+// Command to clean up generated folder
+func (m model) cleanupGeneratedFolderCmd() tea.Cmd {
+	return func() tea.Msg {
+		// Default to "../generated" if no output dir is set yet
+		dirToClean := m.outputDir
+		if dirToClean == "" {
+			dirToClean = "../generated"
+		}
+
+		// Check if directory exists
+		if _, err := os.Stat(dirToClean); os.IsNotExist(err) {
+			return cleanupResultMsg{message: fmt.Sprintf("Folder %s does not exist", dirToClean), err: nil}
+		}
+
+		// Remove directory and contents
+		err := os.RemoveAll(dirToClean)
+		if err != nil {
+			return cleanupResultMsg{message: "", err: fmt.Errorf("failed to clean up folder %s: %v", dirToClean, err)}
+		}
+
+		return cleanupResultMsg{message: fmt.Sprintf("Successfully cleaned up folder %s", dirToClean), err: nil}
+	}
+}
+
+// Main function to start Bubble Tea UI
 func main() {
-	inputFile := flag.String("input", "", "Path to the OpenAPI JSON specification file")
-	outputDir := flag.String("output", "generated", "Directory to output generated code")
-	flag.Parse()
-
-	if *inputFile == "" {
-		fmt.Println("Error: Input file path is required. Use --input <path>")
+	p := tea.NewProgram(InitialModel())
+	if _, err := p.Run(); err != nil {
+		fmt.Printf("Error starting UI: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Read and parse the OpenAPI spec
-	spec, err := readOpenAPISpec(*inputFile)
-	if err != nil {
-		fmt.Printf("Error reading OpenAPI spec: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Create output directory
-	if err := os.MkdirAll(*outputDir, 0755); err != nil {
-		fmt.Printf("Error creating output directory: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Generate code
-	if err := generateCode(spec, *outputDir); err != nil {
-		fmt.Printf("Error generating code: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Code generated successfully in %s\n", *outputDir)
 }
 
 // readOpenAPISpec reads and unmarshals the OpenAPI JSON file
