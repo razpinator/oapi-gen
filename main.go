@@ -327,10 +327,10 @@ func (m model) generateCodeCmd() tea.Cmd {
 // Command to clean up generated folder
 func (m model) cleanupGeneratedFolderCmd() tea.Cmd {
 	return func() tea.Msg {
-		// Default to "../generated" if no output dir is set yet
+		// Default to "generated" if no output dir is set yet
 		dirToClean := m.outputDir
 		if dirToClean == "" {
-			dirToClean = "../generated"
+			dirToClean = "generated"
 		}
 
 		// Check if directory exists
