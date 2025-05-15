@@ -154,5 +154,3 @@ This project is licensed under the MIT License. See the `LICENSE` file for detai
 For questions or support, please open an issue on the repository or contact the maintainers.
 
 ---
-
-*Generated with ❤️ by the OpenAPI Code Generator Team*
